@@ -1,4 +1,4 @@
-## Amazon MSK Library for AWS Identity and Access Management 
+## Amazon MSK Library for AWS Identity and Access Management (Only works with Databricks)
 
 ## License
 
