@@ -32,6 +32,13 @@ An uber jar containing the library and all its relocated dependencies except the
 The generated uber jar file can also be found at: `build/libs/`. At runtime, the uber jar expects to find the kafka
  client library and the `sl4j-api` library on the classpath. 
 
+## Validating secure dependencies
+To ensure no security vulnerabilities in the dependency libraries, run the following.
+
+ `gradle dependencyCheckAnalyze`
+
+If the above reports any vulnerabilities, upgrade dependencies to use the respective latest versions.
+
 ## Using the Amazon MSK Library for IAM Authentication
 The recommended way to use this library is to consume it from maven central while building a Kafka client application.
 
@@ -39,7 +46,7 @@ The recommended way to use this library is to consume it from maven central whil
   <dependency>
       <groupId>software.amazon.msk</groupId>
       <artifactId>aws-msk-iam-auth</artifactId>
-      <version>1.1.0</version>
+      <version>1.1.7</version>
   </dependency>
   ```
 If you want to use it with a pre-existing Kafka client, you could build the uber jar and place it in the Kafka client's
@@ -124,15 +131,72 @@ The `awsRoleSessionName` is optional.
  
  `awsStsRegion` optionally specifies the regional endpoint of AWS STS to use 
 while assuming the IAM role. If `awsStsRegion` is omitted the global endpoint for AWS STS is used by default. 
-When the Kafka client is running in a VPC with an interface VPC Endpoint to a regional endpoint of AWS STS and we want
+When the Kafka client is running in a VPC with an [STS interface VPC Endpoint][StsVpcE] [(AWS PrivateLink)][PrivateLink] to a regional endpoint of AWS STS and we want
  all STS traffic to go over that endpoint, we should set `awsStsRegion` to the region corresponding to the interface
- VPC Endpoint.
+ VPC Endpoint. It may also be necessary to configure the `sts_regional_endpoints` shared AWS config file setting, or 
+ the AWS_STS_REGIONAL_ENDPOINTS environment variable as per the [AWS STS Regionalized endpoints documentation.][StsRegionalEndpointsDoc]
  
 The Default Credential Provider Chain must contain the permissions necessary to assume the client role.
 For example, if the client is an EC2 instance, its instance profile should have permission to assume the
  `msk_client_role`.
  
+### Figuring out whether or not to use default credentials
+
+When you want the MSK client to connect to MSK using credentials not found in the [AWS Default Credentials Provider Chain][DefaultCreds], you can specify an `awsProfileName` containing the credential profile to use, or an `awsRoleArn` to indicate an IAM Role’s ARN to assume using credentials in the Default Credential Provider Chain.  These parameters are optional, and if they are not set the MSK client will use credentials from the Default Credential Provider Chain. There is no need to specify them if you intend to use an IAM role associated with an AWS compute service, such as EC2 or ECS to authenticate to MSK.
+
+### Retries while getting credentials
+In some scenarios the IAM credentials might be transiently unavailable. This will cause the connection to fail, which
+might in some cases cause the client application to stop. 
+So, in version `1.1.3` the library retries loading the credentials when it gets an `SdkClientException` (which wraps
+most `AWS SDK` client side exceptions). Since the retries do not impact the fault-free path and we had heard of user
+issues around random failures loading credentials (e.g.: [#59](https://github.com/aws/aws-msk-iam-auth/issues/59), maybe
+ [#51](https://github.com/aws/aws-msk-iam-auth/issues/51) ), we decided to change the default behavior
+  to retry a maximum of `3` times. It exponentially backs off with full jitter upto a max-delay of `2000 ms`.
+   
+The maximum number of retries and the maximum back off period can be set:
+```
+sasl.jaas.config=software.amazon.msk.auth.iam.IAMLoginModule required awsMaxRetries="7" awsMaxBackOffTimeMs="500";
+```
+This sets the maximum number of retries to `7` and the maximum back off time to `500 ms`.
+
+The retries can be turned off completely by setting `awsMaxRetries` to `"0"`.
+
+
+## Setting EKS Service Account
+ 
+If your Kafka Client, Producer or Consumer, is running on EKS, you can use EKS service accounts to distribute IAM credentials. The [EKS service account documentation](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html) is a good place to start. Following steps cover the scenario of cross account IAM access with EKS service account. Our set-up uses VPC peering for cross account network access, and managed EC2 node group on EKS side. Each step below is linked to AWS documentation for more details and troubleshooting:
+1. Create two AWS accounts one for MSK cluster, let's say it has AWS accountId 'A', and one for EKS cluster, let's say it has AWS accountId 'B'.
+2. [Create VPCs](https://docs.aws.amazon.com/directoryservice/latest/admin-guide/gsg_create_vpc.html) in Account 'A' and Account 'B' with different CIDR blocks. 
+3. [Set-up VPC Peering](https://docs.aws.amazon.com/vpc/latest/peering/create-vpc-peering-connection.html) between the two VPCs that were created in the step 1.
+4. [Create a new MSK cluster](https://docs.aws.amazon.com/msk/latest/developerguide/create-cluster.html) in the account A with IAM auth enabled.
+5. [Create a new EKS cluster](https://docs.aws.amazon.com/eks/latest/userguide/create-cluster.html) in the account B with `--with-oidc` [flag](https://docs.aws.amazon.com/eks/latest/userguide/enable-iam-roles-for-service-accounts.html) to use AWS Identity and Access Management (IAM) roles for service accounts.
+6. [Update security groups](https://docs.aws.amazon.com/quicksight/latest/user/vpc-security-groups.html) for MSK and EKS clusters to allow traffic from each other's CIDR.
+7. [Create an IAM role](https://docs.aws.amazon.com/IAM/latest/UserGuide/tutorial_cross-account-with-roles.html) in the account 'A' which delegates accesss to account 'B'. Attach MSK cluster access policy to this role.
+8. [Create an IAM role](https://docs.aws.amazon.com/IAM/latest/UserGuide/tutorial_cross-account-with-roles.html) in the account 'B' which assumes the role delegated from the account 'A'.
+9. Create a new namespace in the EKS cluster and [create a new service account](https://docs.aws.amazon.com/eks/latest/userguide/associate-service-account-role.html) in that namespace with role created in the step 8.
+10. All apps created under this namespace with the service account from the step 9 will have MSK cluster access. 
+
+With console access to your EKS containers, as in the [EKS example](https://docs.aws.amazon.com/eks/latest/userguide/sample-deployment.html). You can connect, and download the [latest version of Kafka](https://kafka.apache.org/downloads) on the container. It comes with the [kafka CLI](https://kafka.apache.org/quickstart), that you can use for validation. As an example, you can [set-up your config file](#configuring-a-kafka-client-to-use-aws-iam) and use the following command to test topic creation with IAM auth. 
+
+```
+./kafka-topics.sh --bootstrap-server <borker-name>:9098 --create --topic test-topic --partitions 1 --replication-factor 3   --command-config <config_file>
+```
+ 
 ## Troubleshooting
+
+### IAMClientCallbackHandler could not be found
+
+A Kafka client configured to use `AWS_MSK_IAM` may see an error that the `IAMClientCallbackHandler` cannot be found:
+
+```
+Exception in thread "main" org.apache.kafka.common.config.ConfigException: Invalid value 
+software.amazon.msk.auth.iam.IAMClientCallbackHandler for configuration sasl.client.callback.handler.class: 
+Class software.amazon.msk.auth.iam.IAMClientCallbackHandler could not be found.
+```
+
+That means that this `aws-msk-iam-auth` library is not on the classpath of the Kafka client. Please add the `aws-msk-iam-auth` library 
+to the classpath and try again.
+
 
 ### Finding out which identity is being used
 
@@ -185,6 +249,12 @@ It can happen when the `aws-msk-iam-auth` library is placed on the plugin path f
 library is actually used by the Kafka producer and consumer clients and not the Kafka Connect plugin itself, 
 it should be placed in a location that is on the classpath but outside the plugin path. This should ensure that Kafka
  Connect's `PluginClassLoader` is not used to load classes for the `aws-msk-iam-auth` library.
+
+### Dependency mismatch
+If you are building the library from source using `gradle build` and copying it over to a Kafka client on that or
+ another machine, there is a chance that some dependencies may not be available on the Kafka client machine. In that
+  case, you could instead generate and use the uber jar that packages all the necessary runtime dependencies by 
+  running `gradle shadowJar`.
 
 ## Details
 This library introduces a new SASL mechanism called `AWS_MSK_IAM`. The `IAMLoginModule` is used to register the
@@ -432,6 +502,39 @@ public static String UriEncode(CharSequence input, boolean encodeSlash) {
    
 ## Release Notes
 
+### Release 1.1.7
+- Add support to pass session credentials to an STS role credential provider
+- Add support for external id for role-based authentication
+
+### Release 1.1.6
+- Update dependencies to address the following security vulnerability
+  * CVE-2022-41915
+- Add support for explicit access key and secret in `sasl.jaas.config`
+
+### Release 1.1.5
+
+- Update dependencies to address the following security vulnerabilities.
+  * CVE-2022-42003
+  * CVE-2022-42004
+- Add support for multi-classloader environments, such as Apache Flink ([#36](https://github.com/aws/aws-msk-iam-auth/issues/36))
+
+### Release 1.1.4
+
+- Update dependencies to address the following security vulnerabilities.
+  * CVE-2021-37136
+  * CVE-2021-37137
+  * CVE-2022-24823
+  * CVE-2021-43797
+  * CVE-2021-38153
+  * CVE-2020-36518
+- Specifically, build and test against Kafka 2.8.
+
+### Release 1.1.3
+
+- Add retries if loading credential fails with client side errors.
+- If AWS STS is not accessible for identifying the credential when `awsDebugCreds=true`, do not fail the connection.
+- Update Troubleshooting section in README.
+
 ### Release 1.1.2
 
 - Update log4j version in test dependencies to CVE-2021-44832
@@ -465,3 +568,6 @@ See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more inform
 [AwsSDK]: https://github.com/aws/aws-sdk-java
 [RoleProfileCLI]: https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-role.html
 [MSKLimits]: https://docs.aws.amazon.com/msk/latest/developerguide/limits.html
+[StsVpcE]: https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_sts_vpce.html
+[PrivateLink]: https://aws.amazon.com/privatelink/?privatelink-blogs.sort-by=item.additionalFields.createdDate&privatelink-blogs.sort-order=desc
+[StsRegionalEndpointsDoc]: https://docs.aws.amazon.com/sdkref/latest/guide/feature-sts-regionalized-endpoints.html
