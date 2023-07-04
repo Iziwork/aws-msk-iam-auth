@@ -21,7 +21,7 @@ import software.amazon.msk.auth.iam.IAMClientCallbackHandler;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.RandomStringUtils;
-import org.apache.kafka.common.errors.IllegalSaslStateException;
+import kafkashaded.org.apache.kafka.common.errors.IllegalSaslStateException;
 import org.junit.jupiter.api.Test;
 import software.amazon.msk.auth.iam.internals.IAMSaslClient.ClassLoaderAwareIAMSaslClientFactory;
 
