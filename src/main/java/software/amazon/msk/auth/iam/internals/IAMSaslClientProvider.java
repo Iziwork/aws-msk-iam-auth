@@ -15,10 +15,12 @@
 */
 package software.amazon.msk.auth.iam.internals;
 
-import software.amazon.msk.auth.iam.IAMLoginModule;
+import software.amazon.msk.auth.iam.internals.IAMSaslClient.IAMSaslClientFactory;
 
 import java.security.Provider;
 import java.security.Security;
+
+import static software.amazon.msk.auth.iam.internals.IAMSaslClient.getMechanismNameForClassLoader;
 
 public class IAMSaslClientProvider extends Provider {
     /**
@@ -26,8 +28,10 @@ public class IAMSaslClientProvider extends Provider {
      * and information.
      */
     protected IAMSaslClientProvider() {
-        super("SASL/IAM Client Provider", 1.0, "SASL/IAM Client Provider for Kafka");
-        put("SaslClientFactory." + IAMLoginModule.MECHANISM, IAMSaslClient.IAMSaslClientFactory.class.getName());
+        super("SASL/IAM Client Provider (" +
+                IAMSaslClientProvider.class.getClassLoader().hashCode(), 1.0,
+                ") SASL/IAM Client Provider for Kafka");
+        put("SaslClientFactory." + getMechanismNameForClassLoader(getClass().getClassLoader()), IAMSaslClientFactory.class.getName());
     }
 
     public static void initialize() {
